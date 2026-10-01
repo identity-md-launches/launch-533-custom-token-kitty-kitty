@@ -351,13 +351,35 @@ contract KITTYTest is Test {
         assertEq(token.balanceOf(DEAD), 2);
     }
 
-    function test_poolManagerBuyAndOrdinarySellBothMoveFullValue() public {
+    function test_poolManagerPayoutPaysFeeAndSellingNetReceiptMovesFullValue() public {
         _fund(MANAGER, 100);
         vm.prank(MANAGER);
         token.transfer(ALICE, 100);
-        assertEq(token.balanceOf(ALICE), 100);
+        assertEq(token.balanceOf(ALICE), 98);
+        assertEq(token.balanceOf(MANAGER), 0);
+        assertEq(token.balanceOf(DEAD), 2);
         vm.prank(ALICE);
-        token.transfer(MANAGER, 100);
+        token.transfer(MANAGER, 98);
+        assertEq(token.balanceOf(MANAGER), 98);
+        assertEq(token.balanceOf(ALICE), 0);
+        assertEq(token.balanceOf(DEAD), 2);
+    }
+
+    function test_poolManagerPayoutCannotBeExemptedByDistributorLookup() public {
+        factory.setDistributor(LAUNCH, MANAGER);
+        _fund(MANAGER, 100);
+        vm.prank(MANAGER);
+        token.transfer(ALICE, 100);
+        assertEq(token.balanceOf(ALICE), 98);
+        assertEq(token.balanceOf(MANAGER), 0);
+        assertEq(token.balanceOf(DEAD), 2);
+    }
+
+    function test_poolManagerOverdrawRevertsBeforeChargingFee() public {
+        _fund(MANAGER, 100);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, MANAGER, 100, 101));
+        vm.prank(MANAGER);
+        token.transfer(ALICE, 101);
         assertEq(token.balanceOf(MANAGER), 100);
         assertEq(token.balanceOf(ALICE), 0);
         assertEq(token.balanceOf(DEAD), 0);
@@ -375,7 +397,7 @@ contract KITTYTest is Test {
         assertEq(token.allowance(ALICE, SPENDER), 0);
     }
 
-    function test_privilegedCallersStillRequireAllowance() public {
+    function test_launchCallersStillRequireGrossAllowance() public {
         factory.setDistributor(LAUNCH, DISTRIBUTOR);
         _fund(ALICE, 300);
         address[3] memory callers = [address(factory), MANAGER, DISTRIBUTOR];
@@ -391,9 +413,9 @@ contract KITTYTest is Test {
             token.transferFrom(ALICE, BOB, 100);
             assertEq(token.allowance(ALICE, callers[i]), 0);
         }
-        assertEq(token.balanceOf(BOB), 300);
+        assertEq(token.balanceOf(BOB), 298);
         assertEq(token.balanceOf(ALICE), 0);
-        assertEq(token.balanceOf(DEAD), 0);
+        assertEq(token.balanceOf(DEAD), 2);
     }
 
     function test_unrelatedSpenderIsTaxedEvenWhenFromAddressIsPrivileged() public {
@@ -439,15 +461,15 @@ contract KITTYTest is Test {
         assertEq(token.totalSupply(), SUPPLY);
     }
 
-    function test_lookupFailureDoesNotAffectFactoryOrManagerExemptions() public {
+    function test_lookupFailurePreservesExemptDepositsAndTaxedManagerPayouts() public {
         factory.setMode(KittyFactoryMock.LookupMode.ExhaustGas);
         _fund(ALICE, 100);
         vm.prank(ALICE);
         token.transfer(MANAGER, 100);
         vm.prank(MANAGER);
         token.transfer(BOB, 100);
-        assertEq(token.balanceOf(BOB), 100);
-        assertEq(token.balanceOf(DEAD), 0);
+        assertEq(token.balanceOf(BOB), 98);
+        assertEq(token.balanceOf(DEAD), 2);
     }
 
     function test_factoryWithoutLookupCodeDoesNotFreezeOrdinaryHolders() public {

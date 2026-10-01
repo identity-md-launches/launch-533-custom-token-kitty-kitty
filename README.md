@@ -17,15 +17,15 @@ The dead-address fee is a transfer, not an ERC-20 supply burn: `totalSupply()`
 always remains `1e27`. The dead address is conventionally considered inaccessible;
 the token has no recovery mechanism or special authority over its balance.
 
-The task's “every transfer” wording conflicts with its pinned launch checks,
-which require whole distributions and exact Uniswap v4 settlement. This project
-interprets those checks as requiring the following launch exceptions:
+The pinned launch checks require whole distributions and exact inbound Uniswap
+v4 settlement. The token retains these launch exceptions; PoolManager payouts
+pay the same 2% fee as ordinary transfers:
 
 | Transfer condition | Fee |
 | --- | --- |
 | Caller is the constructor-configured factory | None |
-| Caller is the configured PoolManager | None |
 | Destination is the configured PoolManager, including ordinary traders selling | None |
+| Caller is the configured PoolManager, paying another address | 2%, rounded down |
 | Caller is `factory.distributorOf(launchNumber)` | None |
 | Any other transfer or transferFrom | 2%, rounded down |
 
@@ -33,7 +33,22 @@ These conditions apply for the token's lifetime, including factory remainder
 distributions and later swaps/claims. They cannot be changed through KITTY.
 Being an exempt caller never bypasses ERC-20 balance or allowance checks.
 Merely sending to the factory/distributor, or spending their tokens as an
-unrelated approved caller, does not grant an exception.
+unrelated approved caller, does not grant an exception. Registering the
+PoolManager itself as the distributor cannot exempt its payouts.
+
+PoolManager payouts include swaps, liquidity withdrawals, protocol-fee
+withdrawals, and ERC-6909 claim redemptions. A gross payout of 1,000 KITTY debits
+the manager by 1,000, credits the recipient with 980, and credits the dead
+address with 20. Manager accounting still settles the gross amount; recipient
+receipts are **not** the gross amount quoted by the pool. Selling the actual
+received 980 KITTY pays all 980 to the manager and settles normally.
+
+This closes the reported permissionless `sync` / `settle` / `take` relay:
+depositing 1,000 and taking it to another wallet now charges 20 KITTY on payout.
+Wrapping into ERC-6909 claims remains full-value, but redemption is taxed.
+Transfers of claims themselves do not call KITTY and cannot be taxed by KITTY.
+The manager uses the same token transfer call for these payouts and swap
+receipts, so the token does not grant an exemption based on a claimed purpose.
 
 Rounding is in base units: amounts below 50 base units have zero fee; 50 and
 51 units each have a 1-unit fee. Splitting amounts can therefore reduce rounding
@@ -75,8 +90,8 @@ address depends on the deployed token. Its view call is limited to 30,000 gas
 and accepts only an exact 32-byte ABI address result. A failed, missing,
 malformed, or over-budget response grants no distributor exemption; ordinary
 holder transfers continue with the usual fee. The response is fetched with
-`STATICCALL` and at most 32 bytes are copied. No lookup happens for factory or
-PoolManager operations.
+`STATICCALL` and at most 32 bytes are copied. No lookup happens for factory
+operations, deposits into PoolManager, or its taxed payouts.
 
 Factory and PoolManager addresses are configuration, not on-chain authenticity
 checks. No network-specific addresses were supplied or verified. Before launch,
@@ -90,11 +105,15 @@ restrict such a factory change.
 The network deployer remains responsible for correct launch economics,
 distributor registration, distribution, pool initialization/seeding, and source
 verification. Integrators must advertise the exemptions and handle net receipt
-amounts for ordinary transfers; pools other than the configured PoolManager
-are taxed. Routing through the exempt manager may avoid a wallet-transfer fee;
-this implementation does not promise an unavoidable tax on all economic value
-movement. There are no token keepers, admin keys, or adjustable operational
-parameters. Tokens sent to KITTY itself have no rescue path. Native ETH is not
+amounts for ordinary transfers and PoolManager payouts; pools other than the
+configured PoolManager are taxed in both directions. Routers and frontends must
+measure actual receipts, enforce minimum outputs against net receipts, and
+quote the payout fee for buys, liquidity withdrawals, and claim redemptions.
+A router that assumes a gross quoted output reaches the recipient unchanged
+is incompatible without adapting that assumption. Factory/distributor callers
+remain trusted exceptions, and the token does not promise a fee on transfers
+of external wrapper claims. There are no token keepers, admin keys, or adjustable
+operational parameters. Tokens sent to KITTY itself have no rescue path. Native ETH is not
 accepted by a payable entrypoint and forcibly sent ETH has no withdrawal path.
 
 ## Build and tests
@@ -113,18 +132,20 @@ submodules, package installation, RPC, environment variables, FFI, or filesystem
 cheatcodes are required. With the pinned compiler installed, verification needs
 no network. Compiler metadata uses `bytecode_hash = "none"`.
 
-Local validation passed `forge build`, `forge test` (45 passing tests, including
-three fuzz tests with 512 cases each and three stateful invariants over 8,192
-handler calls), and `forge fmt --check`. A forced offline rebuild and the full
-suite with four test threads also passed with an empty process environment.
+Local revision validation passed `forge build`, `forge test` (50 tests), and
+`forge fmt --check`. The suite includes three fuzz tests with 512 cases each
+and three stateful invariants over 8,192 handler calls.
 
 Unit and fuzz tests cover token accounting, rounding, events, approval behavior,
 failure atomicity, configuration validation, and launch exceptions. Stateful
 invariants exercise sequences of direct and delegated transfers and check fixed
 supply, conservation of balances, and dead-address fee accounting. The local
 launch integration uses a real vendored Uniswap v4 PoolManager to check complete
-swarm distribution/claims, single-sided seeding, and an ordinary trader buying
-and selling back their tokens.
+swarm distribution/claims, single-sided seeding, a trader buying and selling
+back their actual net receipt, and taxed liquidity withdrawals. The relay and
+ERC-6909 redemption regressions reproduce the reviewer's proof with a real
+PoolManager; both now charge a fee. An underpaid sell must revert atomically
+without changing either party's balances or the previously collected fee.
 
 The pinned `Token.protected.t.sol` belongs to the external launch verifier: it
 requires that verifier's launch infrastructure, manifest bytecode, and

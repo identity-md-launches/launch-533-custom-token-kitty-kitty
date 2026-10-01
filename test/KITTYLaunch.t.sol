@@ -66,7 +66,7 @@ contract KITTYLaunchTest is Test {
         assertEq(token.totalSupply(), supply);
     }
 
-    function testSingleSidedSeedAndOrdinaryTraderBuyThenSellSettleExactly() public {
+    function testSingleSidedSeedAndTraderBuyThenNetSellSettleGrossWithTaxedOutput() public {
         uint256 swarm = token.INITIAL_SUPPLY() / 10;
         factory.move(token, DISTRIBUTOR, swarm);
         uint256 factoryBefore = token.balanceOf(address(factory));
@@ -83,12 +83,15 @@ contract KITTYLaunchTest is Test {
         BalanceDelta buy = trader.swap(key, true, 1 ether, false);
         assertEq(int256(buy.amount0()), -int256(1 ether));
         assertGt(int256(buy.amount1()), 0);
-        uint256 bought = uint128(buy.amount1());
+        uint256 grossBought = uint128(buy.amount1());
+        uint256 fee = grossBought / 50;
+        uint256 bought = grossBought - fee;
+        assertGt(fee, 0);
         assertEq(token.balanceOf(address(trader)), bought);
-        assertEq(token.balanceOf(address(manager)), seeded - bought);
+        assertEq(token.balanceOf(address(manager)), seeded - grossBought);
         assertEq(address(trader).balance, 9 ether);
         assertEq(address(manager).balance, 1 ether);
-        assertEq(token.balanceOf(token.DEAD()), 0);
+        assertEq(token.balanceOf(token.DEAD()), fee);
 
         BalanceDelta sell = trader.swap(key, false, bought, false);
         assertEq(int256(sell.amount1()), -int256(bought));
@@ -96,10 +99,34 @@ contract KITTYLaunchTest is Test {
         uint256 receivedEth = uint128(sell.amount0());
         assertLt(receivedEth, 1 ether); // The pool's liquidity-provider fee remains in the pool.
         assertEq(token.balanceOf(address(trader)), 0);
-        assertEq(token.balanceOf(address(manager)), seeded);
+        assertEq(token.balanceOf(address(manager)), seeded - fee);
         assertEq(address(trader).balance, 9 ether + receivedEth);
         assertEq(address(manager).balance, 1 ether - receivedEth);
-        assertEq(token.balanceOf(token.DEAD()), 0);
+        assertEq(token.balanceOf(token.DEAD()), fee);
+        assertEq(
+            token.balanceOf(address(manager)) + token.balanceOf(DISTRIBUTOR) + token.balanceOf(REQUESTER)
+                + token.balanceOf(token.DEAD()),
+            token.INITIAL_SUPPLY()
+        );
+        assertEq(token.totalSupply(), token.INITIAL_SUPPLY());
+    }
+
+    function testLiquidityWithdrawalDeliversNetAndDebitsManagerGross() public {
+        uint256 seeded = _seed();
+        uint256 factoryBefore = token.balanceOf(address(factory));
+        BalanceDelta withdrawal = factory.withdraw(key, LIQUIDITY);
+        assertEq(int256(withdrawal.amount0()), 0);
+        assertGt(int256(withdrawal.amount1()), 0);
+        uint256 gross = uint128(withdrawal.amount1());
+        uint256 fee = gross / 50;
+        assertGt(fee, 0);
+        assertEq(token.balanceOf(address(factory)), factoryBefore + gross - fee);
+        assertEq(token.balanceOf(address(manager)), seeded - gross);
+        assertEq(token.balanceOf(token.DEAD()), fee);
+        assertEq(
+            token.balanceOf(address(factory)) + token.balanceOf(address(manager)) + token.balanceOf(token.DEAD()),
+            token.INITIAL_SUPPLY()
+        );
         assertEq(token.totalSupply(), token.INITIAL_SUPPLY());
     }
 
@@ -108,6 +135,7 @@ contract KITTYLaunchTest is Test {
         trader.swap(key, true, 1 ether, false);
         uint256 bought = token.balanceOf(address(trader));
         uint256 managerTokens = token.balanceOf(address(manager));
+        uint256 deadTokens = token.balanceOf(token.DEAD());
         uint256 traderEth = address(trader).balance;
         uint256 managerEth = address(manager).balance;
 
@@ -117,11 +145,12 @@ contract KITTYLaunchTest is Test {
         assertEq(token.balanceOf(address(manager)), managerTokens);
         assertEq(address(trader).balance, traderEth);
         assertEq(address(manager).balance, managerEth);
-        assertEq(token.balanceOf(token.DEAD()), 0);
+        assertEq(token.balanceOf(token.DEAD()), deadTokens);
 
         trader.swap(key, false, bought, false);
         assertEq(token.balanceOf(address(trader)), 0);
         assertEq(token.balanceOf(address(manager)), managerTokens + bought);
+        assertEq(token.balanceOf(token.DEAD()), deadTokens);
         assertEq(token.totalSupply(), token.INITIAL_SUPPLY());
     }
 

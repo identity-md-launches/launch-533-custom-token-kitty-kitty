@@ -71,17 +71,17 @@ contract KittyFactoryV4Harness is KittySettlementHarness {
     }
 
     function seed(PoolKey calldata key, uint128 liquidity) external onlyController returns (BalanceDelta) {
-        return abi.decode(manager.unlock(abi.encode(key, liquidity)), (BalanceDelta));
+        return abi.decode(manager.unlock(abi.encode(key, int256(uint256(liquidity)))), (BalanceDelta));
+    }
+
+    function withdraw(PoolKey calldata key, uint128 liquidity) external onlyController returns (BalanceDelta) {
+        return abi.decode(manager.unlock(abi.encode(key, -int256(uint256(liquidity)))), (BalanceDelta));
     }
 
     function unlockCallback(bytes calldata data) external onlyManager returns (bytes memory) {
-        (PoolKey memory key, uint128 liquidity) = abi.decode(data, (PoolKey, uint128));
+        (PoolKey memory key, int256 liquidity) = abi.decode(data, (PoolKey, int256));
         (BalanceDelta delta,) = manager.modifyLiquidity(
-            key,
-            ModifyLiquidityParams({
-                tickLower: -60, tickUpper: 0, liquidityDelta: int256(uint256(liquidity)), salt: bytes32(0)
-            }),
-            ""
+            key, ModifyLiquidityParams({tickLower: -60, tickUpper: 0, liquidityDelta: liquidity, salt: bytes32(0)}), ""
         );
         _settle(key.currency0, delta.amount0(), false);
         _settle(key.currency1, delta.amount1(), false);

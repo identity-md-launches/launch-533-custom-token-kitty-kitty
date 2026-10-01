@@ -8,9 +8,9 @@ interface IKittyLaunchFactory {
 }
 
 /// @title KITTY
-/// @notice Fixed-supply token with a 2% dead-address fee on ordinary transfers.
-/// @dev The immutable launch integration exempts factory/distributor operations and PoolManager
-/// settlement. These exceptions are required for full-value launch distributions and v4 swaps.
+/// @notice Fixed-supply token with a 2% dead-address fee, including PoolManager payouts.
+/// @dev Factory/distributor operations and deposits into PoolManager remain exempt for exact
+/// launch distributions and inbound settlement. Manager payouts debit gross and deliver net.
 contract KITTY is ERC20 {
     uint256 public constant INITIAL_SUPPLY = 1_000_000_000 * 10 ** 18;
     uint256 public constant FEE_BPS = 200;
@@ -56,7 +56,11 @@ contract KITTY is ERC20 {
 
     function _isLaunchTransfer(address to) private view returns (bool) {
         address caller = _msgSender();
-        if (caller == factory || caller == poolManager || to == poolManager) return true;
+        if (caller == factory || to == poolManager) return true;
+
+        // Permissionless take() serves swaps, relays and ERC-6909 redemptions alike. Exempting
+        // its payouts would let any holder bypass the fee through sync/settle/take.
+        if (caller == poolManager) return false;
 
         // The distributor depends on this token's CREATE2 address, so cannot be a constructor argument.
         // A failed lookup must not freeze ordinary holders; it simply grants no distributor exemption.
