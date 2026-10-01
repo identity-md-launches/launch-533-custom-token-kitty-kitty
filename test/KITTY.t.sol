@@ -464,43 +464,52 @@ contract KITTYTest is Test {
 
     function test_noPublicMintPauseBlacklistOrSeizeSelectors() public {
         _fund(ALICE, 100);
-        string[22] memory signatures = [
-            "mint(address,uint256)",
-            "mint(uint256)",
-            "mint()",
-            "issue(uint256)",
-            "setOwner(address)",
-            "transferOwnership(address)",
-            "upgradeTo(address)",
-            "initialize(address)",
-            "unpause()",
-            "setMinter(address)",
-            "pause()",
-            "blacklist(address)",
-            "blocklist(address)",
-            "freeze(address)",
-            "freezeAccount(address)",
-            "setBlacklist(address,bool)",
-            "setBlocked(address,bool)",
-            "lock(address)",
-            "disableTransfers()",
-            "setTransfersEnabled(bool)",
-            "burnFrom(address,uint256)",
-            "seize(address)"
-        ];
-        for (uint256 i; i < signatures.length; ++i) {
-            bytes memory data = abi.encodeWithSignature(signatures[i], ALICE, uint256(100));
-            vm.prank(address(factory));
-            (bool success,) = address(token).call(data);
-            assertFalse(success, signatures[i]);
-            vm.prank(SPENDER);
-            (success,) = address(token).call(data);
-            assertFalse(success, signatures[i]);
+        // Each probe must have valid ABI arguments: an invalid bool can revert before a
+        // dangerous implementation reaches its authorization or state-changing logic.
+        bytes[] memory probes = new bytes[](25);
+        probes[0] = abi.encodeWithSignature("mint(address,uint256)", ALICE, uint256(100));
+        probes[1] = abi.encodeWithSignature("mint(uint256)", uint256(100));
+        probes[2] = abi.encodeWithSignature("mint()");
+        probes[3] = abi.encodeWithSignature("issue(uint256)", uint256(100));
+        probes[4] = abi.encodeWithSignature("setOwner(address)", ALICE);
+        probes[5] = abi.encodeWithSignature("transferOwnership(address)", ALICE);
+        probes[6] = abi.encodeWithSignature("upgradeTo(address)", ALICE);
+        probes[7] = abi.encodeWithSignature("initialize(address)", ALICE);
+        probes[8] = abi.encodeWithSignature("unpause()");
+        probes[9] = abi.encodeWithSignature("setMinter(address)", ALICE);
+        probes[10] = abi.encodeWithSignature("pause()");
+        probes[11] = abi.encodeWithSignature("blacklist(address)", ALICE);
+        probes[12] = abi.encodeWithSignature("blocklist(address)", ALICE);
+        probes[13] = abi.encodeWithSignature("freeze(address)", ALICE);
+        probes[14] = abi.encodeWithSignature("freezeAccount(address)", ALICE);
+        probes[15] = abi.encodeWithSignature("setBlacklist(address,bool)", ALICE, true);
+        probes[16] = abi.encodeWithSignature("setBlacklist(address,bool)", ALICE, false);
+        probes[17] = abi.encodeWithSignature("setBlocked(address,bool)", ALICE, true);
+        probes[18] = abi.encodeWithSignature("setBlocked(address,bool)", ALICE, false);
+        probes[19] = abi.encodeWithSignature("lock(address)", ALICE);
+        probes[20] = abi.encodeWithSignature("disableTransfers()");
+        probes[21] = abi.encodeWithSignature("setTransfersEnabled(bool)", true);
+        probes[22] = abi.encodeWithSignature("setTransfersEnabled(bool)", false);
+        probes[23] = abi.encodeWithSignature("burnFrom(address,uint256)", ALICE, uint256(100));
+        probes[24] = abi.encodeWithSignature("seize(address)", ALICE);
+        address[2] memory callers = [address(factory), SPENDER];
+        for (uint256 i; i < probes.length; ++i) {
+            for (uint256 j; j < callers.length; ++j) {
+                vm.prank(callers[j]);
+                (bool success,) = address(token).call(probes[i]);
+                assertFalse(success, string.concat("admin probe ", vm.toString(i), " unexpectedly succeeded"));
+                _assertFailedTransferBalances(100);
+                assertEq(token.balanceOf(address(factory)), SUPPLY - 100);
+                assertEq(token.balanceOf(SPENDER), 0);
+                assertEq(token.allowance(ALICE, callers[j]), 0);
+            }
         }
-        _assertFailedTransferBalances(100);
         vm.prank(ALICE);
-        token.transfer(BOB, 100);
+        assertTrue(token.transfer(BOB, 100));
+        assertEq(token.balanceOf(ALICE), 0);
         assertEq(token.balanceOf(BOB), 98);
+        assertEq(token.balanceOf(DEAD), 2);
+        assertEq(token.totalSupply(), SUPPLY);
     }
 
     function test_runtimeHasNoDelegatecallCallcodeOrSelfdestruct() public view {
