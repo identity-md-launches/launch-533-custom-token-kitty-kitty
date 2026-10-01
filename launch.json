@@ -1,0 +1,20 @@
+{
+  "kind": "custom_token",
+  "token": {
+    "contract": "KITTY",
+    "name": "KITTY",
+    "symbol": "KITTY",
+    "decimals": 18,
+    "constructorArgs": ["$factory", "$poolManager", "$launchNumber"],
+    "totalSupply": "1000000000000000000000000000"
+  },
+  "contracts": [],
+  "pool": {
+    "pairedCurrency": "0x0000000000000000000000000000000000000000",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "initialPrice": "792281625142643375935439503360000"
+  },
+  "economics": {"poolBps":9000,"initialMarketCapWei":"10000000000000000000"},
+  "notes": "KITTY mints 1,000,000,000 tokens with 18 decimals once to constructor msg.sender, which must equal $factory. Constructor arguments are factory (address), poolManager (address), and launchNumber (uint64), in that order. Ordinary transfer and transferFrom operations send floor(gross amount / 50) to 0x000000000000000000000000000000000000dEaD and the remainder to the recipient. This fee leaves totalSupply unchanged. The accepted implementation exempts calls by the configured factory, PoolManager, or distributor resolved through factory.distributorOf(launchNumber), and transfers whose destination is the configured PoolManager. These exemptions preserve full-value launch distributions, claims, and pool settlement; balance and allowance checks still apply. KITTY has no subsequent mint, owner, fee setter, pause, blacklist, seizure, or upgrade entrypoint. No application contracts or initialization calls are required. The native ETH pool uses a 3000 fee (0.3%) and tick spacing 60. initialPrice is provenance only: sqrt(totalSupply / initialMarketCapWei) * 2^96 with ETH as currency0 and KITTY as currency1. The deployer derives the opening price from the supplied economics and totalSupply."
+}
