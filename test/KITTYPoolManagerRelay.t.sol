@@ -2,11 +2,14 @@
 pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {KITTY} from "src/KITTY.sol";
 import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "v4-core/src/interfaces/callback/IUnlockCallback.sol";
-import {Currency} from "v4-core/src/types/Currency.sol";
+import {IERC20Minimal} from "v4-core/src/interfaces/external/IERC20Minimal.sol";
+import {CustomRevert} from "v4-core/src/libraries/CustomRevert.sol";
+import {Currency, CurrencyLibrary} from "v4-core/src/types/Currency.sol";
 
 /// @dev Minimal stand-in for the launch factory: deploys KITTY as msg.sender and answers distributorOf.
 contract RelayFactory {
@@ -59,7 +62,7 @@ contract Relay is IUnlockCallback {
         require(token.transferFrom(from, address(manager), amount));
         manager.settle();
         if (action == Action.TakeTo) {
-            // Manager pays `to`: caller == poolManager so KITTY charges no fee either.
+            // Manager payouts debit the gross amount and deliver the net amount after KITTY's fee.
             manager.take(currency, to, amount);
         } else {
             manager.mint(to, id, amount);
@@ -69,6 +72,7 @@ contract Relay is IUnlockCallback {
 }
 
 contract KittyPoolManagerRelayTest is Test {
+    uint256 constant SUPPLY = 1_000_000_000 ether;
     address constant DEAD = 0x000000000000000000000000000000000000dEaD;
     address constant ALICE = address(0xA11CE);
     address constant BOB = address(0xB0B);
@@ -89,23 +93,20 @@ contract KittyPoolManagerRelayTest is Test {
         token.approve(address(relay), type(uint256).max);
     }
 
-    /// @dev The spec says every transfer pays 2% to the dead address. Alice moves 1000 KITTY to Bob
-    /// through the PoolManager instead of calling transfer, and Bob receives all 1000.
-    function test_walletToWalletViaPoolManagerPaysNoFee() public {
+    /// @dev Routing an ordinary transfer through PoolManager still charges the 2% fee on payout.
+    function test_walletToWalletViaPoolManagerPaysFeeOnPayout() public {
         vm.prank(ALICE);
         relay.run(Relay.Action.TakeTo, ALICE, BOB, 1_000 ether);
 
         assertEq(token.balanceOf(ALICE), 1_000 ether, "alice debited gross");
         assertEq(token.balanceOf(address(manager)), 0, "manager keeps nothing");
-        // Expected under the spec: Bob 980, DEAD 20. Actual: Bob 1000, DEAD 0.
-        assertEq(token.balanceOf(DEAD), 20 ether, "no fee reached the dead address");
-        assertEq(token.balanceOf(BOB), 980 ether, "bob received the gross amount");
+        assertEq(token.balanceOf(DEAD), 20 ether, "dead receives the fee");
+        assertEq(token.balanceOf(BOB), 980 ether, "bob receives the net amount");
+        assertEq(token.totalSupply(), SUPPLY);
     }
 
-    /// @dev KITTY can be wrapped into PoolManager ERC-6909 claims fee-free, the claims change hands
-    /// fee-free any number of times, and whoever holds them unwraps fee-free. A permanent fee-free
-    /// rail for the token exists from the moment the pool manager is exempted.
-    function test_erc6909ClaimsAreAPermanentFeeFreeWrapper() public {
+    /// @dev Moving ERC-6909 claims does not move KITTY; redeeming those claims charges the payout fee.
+    function test_erc6909ClaimRedemptionPaysFeeAfterClaimsChangeHands() public {
         uint256 id = uint256(uint160(address(token)));
 
         vm.prank(ALICE);
@@ -124,8 +125,121 @@ contract KittyPoolManagerRelayTest is Test {
         vm.prank(CAROL);
         relay.run(Relay.Action.BurnClaimsAndTake, CAROL, CAROL, 1_000 ether);
 
-        assertEq(token.balanceOf(CAROL) + token.balanceOf(DEAD), 1_000 ether, "value was not conserved");
-        // Three hops of value moved; the spec implies a fee should have reached the dead address.
-        assertGt(token.balanceOf(DEAD), 0, "no fee was ever paid on three hops");
+        assertEq(token.balanceOf(ALICE), 1_000 ether);
+        assertEq(token.balanceOf(CAROL), 980 ether, "carol receives the net amount");
+        assertEq(token.balanceOf(DEAD), 20 ether, "redemption charges the fee exactly once");
+        assertEq(token.balanceOf(address(manager)), 0);
+        assertEq(manager.balanceOf(ALICE, id), 0);
+        assertEq(manager.balanceOf(BOB, id), 0);
+        assertEq(manager.balanceOf(CAROL, id), 0);
+        assertEq(token.totalSupply(), SUPPLY);
+    }
+
+    function test_insufficientDepositAllowanceRevertsUnlockAtomically() public {
+        uint256 id = uint256(uint160(address(token)));
+        vm.prank(ALICE);
+        token.approve(address(relay), 999 ether);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IERC20Errors.ERC20InsufficientAllowance.selector, address(relay), 999 ether, 1_000 ether
+            )
+        );
+        vm.prank(ALICE);
+        relay.run(Relay.Action.MintClaims, ALICE, BOB, 1_000 ether);
+
+        assertEq(token.allowance(ALICE, address(relay)), 999 ether);
+        assertEq(token.balanceOf(ALICE), 2_000 ether);
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(token.balanceOf(DEAD), 0);
+        assertEq(token.balanceOf(address(manager)), 0);
+        assertEq(token.balanceOf(address(relay)), 0);
+        assertEq(token.balanceOf(address(factory)), SUPPLY - 2_000 ether);
+        assertEq(manager.balanceOf(ALICE, id), 0);
+        assertEq(manager.balanceOf(BOB, id), 0);
+        assertEq(token.totalSupply(), SUPPLY);
+    }
+
+    function test_zeroRecipientRestoresRedeemedClaimsAndRetryPaysFee() public {
+        uint256 id = uint256(uint160(address(token)));
+        vm.prank(ALICE);
+        relay.run(Relay.Action.MintClaims, ALICE, ALICE, 1_000 ether);
+        vm.prank(ALICE);
+        manager.approve(address(relay), id, 1_000 ether);
+
+        // PoolManager wraps the token's receiver error with the failed transfer's exact context.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(token),
+                IERC20Minimal.transfer.selector,
+                abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)),
+                abi.encodeWithSelector(CurrencyLibrary.ERC20TransferFailed.selector)
+            )
+        );
+        vm.prank(ALICE);
+        relay.run(Relay.Action.BurnClaimsAndTake, ALICE, address(0), 1_000 ether);
+
+        assertEq(manager.balanceOf(ALICE, id), 1_000 ether);
+        assertEq(manager.allowance(ALICE, address(relay), id), 1_000 ether);
+        assertEq(token.allowance(ALICE, address(relay)), type(uint256).max);
+        assertEq(token.balanceOf(ALICE), 1_000 ether);
+        assertEq(token.balanceOf(address(manager)), 1_000 ether);
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(token.balanceOf(DEAD), 0);
+        assertEq(token.balanceOf(address(0)), 0);
+        assertEq(token.balanceOf(address(relay)), 0);
+        assertEq(token.balanceOf(address(factory)), SUPPLY - 2_000 ether);
+        assertEq(token.totalSupply(), SUPPLY);
+
+        vm.prank(ALICE);
+        relay.run(Relay.Action.BurnClaimsAndTake, ALICE, BOB, 1_000 ether);
+
+        assertEq(manager.balanceOf(ALICE, id), 0);
+        assertEq(manager.allowance(ALICE, address(relay), id), 0);
+        assertEq(token.balanceOf(ALICE), 1_000 ether);
+        assertEq(token.balanceOf(BOB), 980 ether);
+        assertEq(token.balanceOf(DEAD), 20 ether);
+        assertEq(token.balanceOf(address(manager)), 0);
+        assertEq(token.totalSupply(), SUPPLY);
+    }
+
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_relayPayoutMatchesDirectTransferForRecipientAliases(
+        uint256 amount,
+        uint256 recipientSeed,
+        bool useClaims
+    ) public {
+        amount = bound(amount, 0, 2_000 ether);
+        address[3] memory recipients = [ALICE, BOB, DEAD];
+        address recipient = recipients[recipientSeed % recipients.length];
+        uint256 snapshot = vm.snapshotState();
+
+        vm.prank(ALICE);
+        assertTrue(token.transfer(recipient, amount));
+        uint256 aliceDirect = token.balanceOf(ALICE);
+        uint256 bobDirect = token.balanceOf(BOB);
+        uint256 deadDirect = token.balanceOf(DEAD);
+        assertTrue(vm.revertToState(snapshot));
+
+        uint256 id = uint256(uint160(address(token)));
+        if (useClaims) {
+            vm.prank(ALICE);
+            relay.run(Relay.Action.MintClaims, ALICE, ALICE, amount);
+            vm.prank(ALICE);
+            manager.setOperator(address(relay), true);
+            vm.prank(ALICE);
+            relay.run(Relay.Action.BurnClaimsAndTake, ALICE, recipient, amount);
+        } else {
+            vm.prank(ALICE);
+            relay.run(Relay.Action.TakeTo, ALICE, recipient, amount);
+        }
+
+        assertEq(token.balanceOf(ALICE), aliceDirect);
+        assertEq(token.balanceOf(BOB), bobDirect);
+        assertEq(token.balanceOf(DEAD), deadDirect);
+        assertEq(token.balanceOf(address(manager)), 0);
+        assertEq(manager.balanceOf(ALICE, id), 0);
+        assertEq(token.totalSupply(), SUPPLY);
     }
 }
