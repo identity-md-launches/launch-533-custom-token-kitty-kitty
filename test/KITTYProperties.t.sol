@@ -160,6 +160,51 @@ contract KITTYPropertiesTest is Test {
         assertEq(token.totalSupply(), SUPPLY);
     }
 
+    function testFuzz_rejectedExemptOverdrawRestoresFiniteAllowance(
+        uint256 holding,
+        uint256 excess,
+        uint256 callerSeed,
+        uint256 recipientSeed
+    ) public {
+        holding = bound(holding, 0, SUPPLY);
+        excess = bound(excess, 1, SUPPLY);
+        uint256 amount = holding + excess;
+        address caller = _caller(callerSeed);
+        address recipient = _recipient(recipientSeed);
+        assertTrue(factory.move(token, ALICE, holding));
+        vm.prank(ALICE);
+        assertTrue(token.approve(caller, amount + 1));
+        bytes32 beforeBalances = _balanceDigest();
+
+        // Unlike an unlimited approval, this allowance is decremented before the
+        // balance check, so a failed transfer must roll that decrement back.
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, ALICE, holding, amount));
+        vm.prank(caller);
+        token.transferFrom(ALICE, recipient, amount);
+        assertEq(token.allowance(ALICE, caller), amount + 1, "rejected overdraw spent finite approval");
+        assertEq(_balanceDigest(), beforeBalances, "rejected overdraw moved value");
+        assertEq(token.totalSupply(), SUPPLY);
+    }
+
+    function test_exemptZeroRecipientRestoresFiniteAllowanceEvenForZeroAmount() public {
+        assertTrue(factory.move(token, ALICE, 100));
+        bytes32 beforeBalances = _balanceDigest();
+        for (uint256 i; i < 4; ++i) {
+            address caller = _caller(i);
+            vm.prank(ALICE);
+            assertTrue(token.approve(caller, 101));
+            for (uint256 j; j < 2; ++j) {
+                vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
+                vm.prank(caller);
+                token.transferFrom(ALICE, address(0), j == 0 ? 100 : 0);
+                assertEq(token.allowance(ALICE, caller), 101, "invalid recipient spent finite approval");
+                assertEq(_balanceDigest(), beforeBalances, "invalid recipient moved value");
+                assertEq(token.balanceOf(address(0)), 0);
+                assertEq(token.totalSupply(), SUPPLY);
+            }
+        }
+    }
+
     function _caller(uint256 seed) private view returns (address) {
         address[4] memory callers = [address(factory), MANAGER, DISTRIBUTOR, SPENDER];
         return callers[seed % callers.length];
